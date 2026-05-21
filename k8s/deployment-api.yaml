@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: uli-api
+  namespace: uli-system
+  labels:
+    app: uli-api
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: uli-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge:       1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: uli-api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port:   "8000"
+        prometheus.io/path:   "/metrics"
+    spec:
+      containers:
+        - name: uli-api
+          image: uli-api:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: uli-config
+            - secretRef:
+                name: uli-secrets
+          resources:
+            requests:
+              cpu:    "500m"
+              memory: "1Gi"
+            limits:
+              cpu:    "2"
+              memory: "2Gi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds:       10
+            timeoutSeconds:      5
+            failureThreshold:    3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds:       10
+            timeoutSeconds:      5
+            failureThreshold:    3
+          startupProbe:
+            httpGet:
+              path: /ready
+              port: 8000
+            failureThreshold:    30
+            periodSeconds:       10
+      terminationGracePeriodSeconds: 30

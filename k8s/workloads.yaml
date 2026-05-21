@@ -1,0 +1,116 @@
+---
+# ── Worker Deployment ─────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: uli-worker
+  namespace: uli-system
+  labels:
+    app: uli-worker
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: uli-worker
+  template:
+    metadata:
+      labels:
+        app: uli-worker
+    spec:
+      containers:
+        - name: uli-worker
+          image: uli-worker:latest
+          imagePullPolicy: Always
+          envFrom:
+            - configMapRef:
+                name: uli-config
+            - secretRef:
+                name: uli-secrets
+          resources:
+            requests:
+              cpu:    "2"
+              memory: "4Gi"
+            limits:
+              cpu:    "4"
+              memory: "8Gi"
+          livenessProbe:
+            exec:
+              command: ["celery", "-A", "uli.worker.celery_app", "inspect", "ping"]
+            initialDelaySeconds: 30
+            periodSeconds:       60
+            timeoutSeconds:      10
+            failureThreshold:    3
+      terminationGracePeriodSeconds: 60
+---
+# ── API Service ───────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: uli-api
+  namespace: uli-system
+  labels:
+    app: uli-api
+spec:
+  type:     ClusterIP
+  selector:
+    app: uli-api
+  ports:
+    - name:       http
+      port:       8000
+      targetPort: 8000
+      protocol:   TCP
+---
+# ── Ingress ───────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: uli-ingress
+  namespace: uli-system
+  annotations:
+    kubernetes.io/ingress.class:               nginx
+    nginx.ingress.kubernetes.io/ssl-redirect:  "true"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "30"
+    cert-manager.io/cluster-issuer:            letsencrypt-prod
+spec:
+  tls:
+    - hosts:
+        - uli.courts.gov.in
+      secretName: uli-tls
+  rules:
+    - host: uli.courts.gov.in
+      http:
+        paths:
+          - path:     /api/v1
+            pathType: Prefix
+            backend:
+              service:
+                name: uli-api
+                port:
+                  number: 8000
+---
+# ── HorizontalPodAutoscaler ───────────────────────────────────────────────────
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: uli-api-hpa
+  namespace: uli-system
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind:       Deployment
+    name:       uli-api
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type:               Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type:               Utilization
+          averageUtilization: 80

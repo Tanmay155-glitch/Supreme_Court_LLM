@@ -1,0 +1,15 @@
+# ── Mock NJDG Server Dockerfile ──────────────────────────────────────────────
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+RUN pip install --no-cache-dir fastapi uvicorn pydantic
+
+WORKDIR /app
+COPY uli/mock_njdg.py ./mock_njdg.py
+COPY uli/models.py    ./models.py
+
+EXPOSE 8001
+
+CMD ["uvicorn", "mock_njdg:app", "--host", "0.0.0.0", "--port", "8001"]

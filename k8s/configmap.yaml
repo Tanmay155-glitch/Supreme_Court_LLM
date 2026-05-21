@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: uli-config
+  namespace: uli-system
+data:
+  LOG_LEVEL:             "INFO"
+  MAX_LOOPS:             "3"
+  CONFIDENCE_THRESHOLD:  "0.98"
+  USE_MOCK_NJDG:         "false"
+  ES_URL:                "http://elasticsearch:9200"
+  NJDG_BASE_URL:         "https://api.njdg.gov.in/uli/v2"

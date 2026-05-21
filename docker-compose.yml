@@ -1,0 +1,227 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ULI — Docker Compose (Development)
+# Services: uli-api, uli-worker, postgres, redis, elasticsearch,
+#           mock-njdg, prometheus, grafana
+# ─────────────────────────────────────────────────────────────────────────────
+
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+networks:
+  uli-net:
+    driver: bridge
+
+volumes:
+  uli_pgdata:
+  uli_esdata:
+  uli_redis_data:
+  uli_prometheus_data:
+  uli_grafana_data:
+
+services:
+
+  # ── PostgreSQL 16 + pgvector ─────────────────────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: uli-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       uli_db
+      POSTGRES_USER:     uli_app
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-change_in_production}
+    volumes:
+      - uli_pgdata:/var/lib/postgresql/data
+      - ./uli/db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U uli_app -d uli_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - uli-net
+    logging: *default-logging
+
+  # ── Redis 7 ─────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: uli-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --maxmemory 2gb
+      --maxmemory-policy allkeys-lru
+      --save 60 1000
+    volumes:
+      - uli_redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - uli-net
+    logging: *default-logging
+
+  # ── Elasticsearch 8.13 ──────────────────────────────────────────────────
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.0
+    container_name: uli-elasticsearch
+    restart: unless-stopped
+    environment:
+      discovery.type:          single-node
+      xpack.security.enabled:  "false"
+      ES_JAVA_OPTS:            "-Xms1g -Xmx1g"
+      cluster.name:            uli-cluster
+      node.name:               uli-node-1
+    volumes:
+      - uli_esdata:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health | grep -v red"]
+      interval: 15s
+      timeout: 10s
+      retries: 6
+    networks:
+      - uli-net
+    logging: *default-logging
+
+  # ── Mock NJDG Server ─────────────────────────────────────────────────────
+  mock-njdg:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.mock-njdg
+    container_name: uli-mock-njdg
+    restart: unless-stopped
+    environment:
+      PORT: "8001"
+    ports:
+      - "8001:8001"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - uli-net
+    logging: *default-logging
+
+  # ── ULI API ──────────────────────────────────────────────────────────────
+  uli-api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    container_name: uli-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      mock-njdg:
+        condition: service_healthy
+    environment:
+      DATABASE_URL:      postgresql+asyncpg://uli_app:${DB_PASSWORD:-change_in_production}@postgres:5432/uli_db
+      REDIS_URL:         redis://redis:6379/0
+      ES_URL:            http://elasticsearch:9200
+      NJDG_BASE_URL:     http://mock-njdg:8001
+      OPENAI_API_KEY:    ${OPENAI_API_KEY:-}
+      PINECONE_API_KEY:  ${PINECONE_API_KEY:-}
+      USE_MOCK_NJDG:     "true"
+      LOG_LEVEL:         ${LOG_LEVEL:-INFO}
+      CONFIDENCE_THRESHOLD: "0.98"
+      MAX_LOOPS:         "3"
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - uli-net
+    logging: *default-logging
+
+  # ── ULI Worker (Celery — embedding + rerank jobs) ────────────────────────
+  uli-worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+    restart: unless-stopped
+    deploy:
+      replicas: 4
+      resources:
+        limits:
+          cpus:   "4"
+          memory: 8G
+        reservations:
+          cpus:   "1"
+          memory: 2G
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      CELERY_BROKER_URL:  redis://redis:6379/1
+      CELERY_RESULT_URL:  redis://redis:6379/2
+      DATABASE_URL:       postgresql+asyncpg://uli_app:${DB_PASSWORD:-change_in_production}@postgres:5432/uli_db
+      OPENAI_API_KEY:     ${OPENAI_API_KEY:-}
+      LOG_LEVEL:          ${LOG_LEVEL:-INFO}
+    networks:
+      - uli-net
+    logging: *default-logging
+
+  # ── Prometheus ───────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: uli-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - uli_prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+    ports:
+      - "9090:9090"
+    depends_on:
+      - uli-api
+    networks:
+      - uli-net
+    logging: *default-logging
+
+  # ── Grafana ──────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: uli-grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_USER:     admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP:     "false"
+    volumes:
+      - uli_grafana_data:/var/lib/grafana
+      - ./docker/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./docker/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+    ports:
+      - "3000:3000"
+    networks:
+      - uli-net
+    logging: *default-logging

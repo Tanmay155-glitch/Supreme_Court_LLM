@@ -1,0 +1,27 @@
+global:
+  scrape_interval:     15s
+  evaluation_interval: 15s
+  external_labels:
+    system: uli
+    env:    development
+
+scrape_configs:
+  - job_name: uli-api
+    static_configs:
+      - targets: ["uli-api:8000"]
+    metrics_path: /metrics
+    scrape_interval: 10s
+
+  - job_name: uli-worker
+    static_configs:
+      - targets: ["uli-worker:9090"]
+    metrics_path: /metrics
+    scrape_interval: 15s
+
+  - job_name: postgres-exporter
+    static_configs:
+      - targets: ["postgres:5432"]
+
+  - job_name: redis-exporter
+    static_configs:
+      - targets: ["redis:6379"]
